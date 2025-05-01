@@ -1,9 +1,11 @@
 from __future__ import print_function
 
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # disable TF_CPP logging
 import argparse
 import socket
 import time
+import json
 
 import tensorboard_logger as tb_logger
 import torch
@@ -12,11 +14,13 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
 from models import model_dict
+import bayes.bnn as bnn
+from bayes.criterion import ELBOLoss
 
 from dataset.cifar100 import get_cifar100_dataloaders
 
-from helper.util import adjust_learning_rate, accuracy, AverageMeter
-from helper.loops import train_vanilla as train, validate
+from helper.util import adjust_learning_rate
+from helper.loops import train_vanilla, train_bayesian, validate as validate_vanilla, validate_bayesian
 
 
 def parse_option():
@@ -49,6 +53,11 @@ def parse_option():
 
     parser.add_argument('-t', '--trial', type=int, default=0, help='the experiment id')
 
+    parser.add_argument('--bayesianize', action='store_true', help='train Bayesian teacher')
+    parser.add_argument('--bnn_ml_epochs', type=int, default=150, help='number of epochs for training with nll loss only')
+    parser.add_argument('--bnn_annealing_epochs', type=int, default=50, help='number of epochs for gradual annealing')
+    parser.add_argument('--bnn_test_samples', type=int, default=8, help='number of test samples from variational inference')
+
     opt = parser.parse_args()
     
     # set different learning rate from these 4 models
@@ -70,6 +79,8 @@ def parse_option():
 
     opt.model_name = '{}_{}_lr_{}_decay_{}_trial_{}'.format(opt.model, opt.dataset, opt.learning_rate,
                                                             opt.weight_decay, opt.trial)
+    if opt.bayesianize:
+        opt.model_name = 'Bayesian-' + opt.model_name
 
     opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
     if not os.path.isdir(opt.tb_folder):
@@ -96,6 +107,9 @@ def main():
 
     # model
     model = model_dict[opt.model](num_classes=n_cls)
+    if opt.bayesianize:
+        cfg = json.load(open('./bayes/configs/ffg_u_cifar100.json'))
+        bnn.bayesianize_(model, **cfg)
 
     # optimizer
     optimizer = optim.SGD(model.parameters(),
@@ -103,7 +117,13 @@ def main():
                           momentum=opt.momentum,
                           weight_decay=opt.weight_decay)
 
-    criterion = nn.CrossEntropyLoss()
+    # criterion
+    if opt.bayesianize:
+        kl_factor = 0. if opt.bnn_ml_epochs > 0 or opt.bnn_annealing_epochs > 0 else 1
+        annealing_rate = opt.bnn_annealing_epochs ** -1 if opt.bnn_annealing_epochs > 0 else 1
+        criterion = ELBOLoss(model, kl_factor=kl_factor, dataset_size=len(train_loader.dataset))
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     if torch.cuda.is_available():
         model = model.cuda()
@@ -114,6 +134,8 @@ def main():
     logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
 
     # routine
+    train = train_bayesian if opt.bayesianize else train_vanilla
+    validate = validate_bayesian if opt.bayesianize else validate_vanilla
     for epoch in range(1, opt.epochs + 1):
 
         adjust_learning_rate(epoch, opt, optimizer)
@@ -157,6 +179,9 @@ def main():
             }
             save_file = os.path.join(opt.save_folder, 'ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
             torch.save(state, save_file)
+
+        if opt.bayesianize and epoch >= opt.bnn_ml_epochs:
+            criterion.kl_factor = min(criterion.kl_factor + annealing_rate, 1)
 
     # This best accuracy is only for printing purpose.
     # The results reported in the paper/README is from the last epoch.

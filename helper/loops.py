@@ -65,6 +65,79 @@ def train_vanilla(epoch, train_loader, model, criterion, optimizer, opt):
     return top1.avg, losses.avg
 
 
+def train_bayesian(epoch, train_loader, model, criterion, optimizer, opt):
+    """Bayesian training"""
+
+    def reset_cache(module):
+        if hasattr(module, "reset_cache"):
+            module.reset_cache()
+
+    model.train()
+
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
+    kl_losses = AverageMeter()
+    nll_losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+
+    end = time.time()
+    for idx, (input, target) in enumerate(train_loader):
+        data_time.update(time.time() - end)
+        model.apply(reset_cache)
+
+        input = input.float()
+        if torch.cuda.is_available():
+            input = input.cuda()
+            target = target.cuda()
+
+        # ===================forward=====================
+        output = model(input)
+        loss, nll, kl = criterion(output, target)
+        
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        losses.update(loss.item(), input.size(0))
+        nll_losses.update(nll.item(), input.size(0))
+        kl_losses.update(kl.item(), input.size(0))
+        top1.update(acc1[0], input.size(0))
+        top5.update(acc5[0], input.size(0))
+
+        # ===================backward=====================
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        model.apply(reset_cache)
+
+        # ===================meters=====================
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        # tensorboard logger
+        pass
+
+        # print info
+        if idx % opt.print_freq == 0:
+            print('Epoch: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  'NLL-Loss {nll_loss.val:.4f} ({nll_loss.avg:.4f})\t'
+                  'KL-Loss {kl_loss.val:.4f} ({kl_loss.avg:.4f})\t'
+                  'KL-factor {kl_factor:.4f}\t'
+                  'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                   epoch, idx, len(train_loader), batch_time=batch_time,
+                   data_time=data_time, loss=losses, nll_loss=nll_losses,
+                   kl_loss=kl_losses, kl_factor=criterion.kl_factor, top1=top1, top5=top5))
+            sys.stdout.flush()
+
+    print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+          .format(top1=top1, top5=top5))
+
+    return top1.avg, losses.avg
+
+
 def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, opt):
     """One epoch distillation"""
     # set modules as train()
@@ -256,6 +329,64 @@ def validate(val_loader, model, criterion, opt):
                       'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                        idx, len(val_loader), batch_time=batch_time, loss=losses,
                        top1=top1, top5=top5))
+
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+              .format(top1=top1, top5=top5))
+
+    return top1.avg, top5.avg, losses.avg
+
+
+def validate_bayesian(val_loader, model, criterion, opt):
+    """validation for Bayesian model"""
+    batch_time = AverageMeter()
+    losses = AverageMeter()
+    nll_losses = AverageMeter()
+    kl_losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+
+    dataset_size = len(val_loader.dataset)
+
+    # switch to evaluate mode
+    model.eval()
+
+    with torch.no_grad():
+        end = time.time()
+        for idx, (input, target) in enumerate(val_loader):
+
+            input = input.float()
+            if torch.cuda.is_available():
+                input = input.cuda()
+                target = target.cuda()
+
+            # compute output
+            output = model(input)
+            loss, nll, kl = criterion(output, target)
+            probs = sum(map(lambda _: model(input).softmax(-1), range(opt.bnn_test_samples))) / opt.bnn_test_samples
+
+            # measure accuracy and record loss
+            acc1, acc5 = accuracy(probs, target, topk=(1, 5))
+            losses.update(loss.item(), input.size(0))
+            nll_losses.update(nll.item(), input.size(0))
+            kl_losses.update(kl.item(), input.size(0))
+            top1.update(acc1[0], input.size(0))
+            top5.update(acc5[0], input.size(0))
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if idx % opt.print_freq == 0:
+                print('Test: [{0}/{1}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                      'NLL-Loss {nll_loss.val:.4f} ({nll_loss.avg:.4f})\t'
+                      'KL-Loss {kl_loss.val:.4f} ({kl_loss.avg:.4f})\t'
+                      'KL-factor {kl_factor:.4f}\t'
+                      'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                       idx, len(val_loader), batch_time=batch_time, loss=losses, nll_loss=nll_losses, 
+                       kl_loss=kl_losses, kl_factor=criterion.kl_factor, top1=top1, top5=top5))
 
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
