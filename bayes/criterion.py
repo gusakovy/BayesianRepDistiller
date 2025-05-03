@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 from bayes.bnn.distributions import dist
 
@@ -14,7 +15,9 @@ class ELBOLoss(nn.Module):
 
     def forward(self, output, target):
         nll = -dist.Categorical(logits=output).log_prob(target).mean()
-        kl = sum(module.parameter_loss() for module in self.model.modules() if hasattr(module, "parameter_loss")) / self.dataset_size
+        kl = torch.tensor(0.0, device=output.device)
+        if self.kl_factor > 0:
+            kl = sum(module.parameter_loss().sum() for module in self.model.modules() if hasattr(module, "parameter_loss")) / self.dataset_size
         loss = nll + kl * self.kl_factor
         
         return loss, nll, kl
