@@ -54,15 +54,21 @@ def parse_option():
     parser.add_argument('-t', '--trial', type=int, default=0, help='the experiment id')
 
     parser.add_argument('--bayesianize', action='store_true', help='train Bayesian teacher')
-    parser.add_argument('--bnn_ml_epochs', type=int, default=150, help='number of epochs for training with nll loss only')
+    parser.add_argument('--bnn_ml_epochs', type=int, default=100, help='number of epochs for training with nll loss only')
     parser.add_argument('--bnn_annealing_epochs', type=int, default=50, help='number of epochs for gradual annealing')
-    parser.add_argument('--bnn_test_samples', type=int, default=8, help='number of test samples from variational inference')
+    parser.add_argument('--bnn_test_samples', type=int, default=20, help='number of test samples for variational inference')
 
     opt = parser.parse_args()
     
     # set different learning rate from these 4 models
     if opt.model in ['MobileNetV2', 'ShuffleV1', 'ShuffleV2']:
         opt.learning_rate = 0.01
+
+    # set different training scheme for Bayesian models
+    if opt.bayesianize:
+        opt.learning_rate = 0.001
+        opt.epochs = 200
+        opt.lr_decay_epochs = '100'
 
     # set the path according to the environment
     if hostname.startswith('visiongpu'):
@@ -112,10 +118,14 @@ def main():
         bnn.bayesianize_(model, **cfg)
 
     # optimizer
-    optimizer = optim.SGD(model.parameters(),
-                          lr=opt.learning_rate,
-                          momentum=opt.momentum,
-                          weight_decay=opt.weight_decay)
+    if opt.bayesianize:
+        optimizer = optim.Adam(model.parameters(),
+                               lr=opt.learning_rate)
+    else:
+        optimizer = optim.SGD(model.parameters(),
+                              lr=opt.learning_rate,
+                              momentum=opt.momentum,
+                              weight_decay=opt.weight_decay)
 
     # criterion
     if opt.bayesianize:
