@@ -5,9 +5,11 @@ the general training framework
 from __future__ import print_function
 
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # disable TF_CPP logging
 import argparse
 import socket
 import time
+import json
 
 import tensorboard_logger as tb_logger
 import torch
@@ -17,6 +19,7 @@ import torch.backends.cudnn as cudnn
 
 
 from models import model_dict
+import bayes.bnn as bnn
 from models.util import Embed, ConvReg, LinearEmbed
 from models.util import Connector, Translator, Paraphraser
 
@@ -24,7 +27,7 @@ from dataset.cifar100 import get_cifar100_dataloaders, get_cifar100_dataloaders_
 
 from helper.util import adjust_learning_rate
 
-from distiller_zoo import DistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss
+from distiller_zoo import DistillKL, BayesianDistillKL, HintLoss, Attention, Similarity, Correlation, VIDLoss, RKDLoss
 from distiller_zoo import PKT, ABLoss, FactorTransfer, KDSVD, FSP, NSTLoss
 from crd.criterion import CRDLoss
 
@@ -87,6 +90,9 @@ def parse_option():
     # hint layer
     parser.add_argument('--hint_layer', default=2, type=int, choices=[0, 1, 2, 3, 4])
 
+    # Bayesian
+    parser.add_argument('--bnn_num_samples', type=int, default=16, help='number of samples for variational inference')
+
     opt = parser.parse_args()
 
     # set different learning rate from these 4 models
@@ -107,6 +113,11 @@ def parse_option():
         opt.lr_decay_epochs.append(int(it))
 
     opt.model_t = get_teacher_name(opt.path_t)
+    if opt.model_t.startswith('Bayesian'):
+        opt.bayesian_t = True
+        opt.kd_T = 1
+    else:
+        opt.bayesian_t = False
 
     opt.model_name = 'S:{}_T:{}_{}_{}_r:{}_a:{}_b:{}_{}'.format(opt.model_s, opt.model_t, opt.dataset, opt.distill,
                                                                 opt.gamma, opt.alpha, opt.beta, opt.trial)
@@ -134,8 +145,15 @@ def get_teacher_name(model_path):
 def load_teacher(model_path, n_cls):
     print('==> loading teacher model')
     model_t = get_teacher_name(model_path)
+    bayesian_t = False
+    if model_t.startswith('Bayesian'):
+        model_t = model_t.split('-')[1]
+        bayesian_t = True
     model = model_dict[model_t](num_classes=n_cls)
-    model.load_state_dict(torch.load(model_path)['model'])
+    if bayesian_t:
+        cfg = json.load(open('./bayes/configs/ffg_u_cifar100.json'))
+        bnn.bayesianize_(model, **cfg)
+    model.load_state_dict(torch.load(model_path, weights_only=False)['model'])
     print('==> done')
     return model
 
@@ -164,10 +182,10 @@ def main():
         raise NotImplementedError(opt.dataset)
 
     # model
-    model_t = load_teacher(opt.path_t, n_cls)
-    model_s = model_dict[opt.model_s](num_classes=n_cls)
+    model_t = load_teacher(opt.path_t, n_cls).cuda()
+    model_s = model_dict[opt.model_s](num_classes=n_cls).cuda()
 
-    data = torch.randn(2, 3, 32, 32)
+    data = torch.randn(2, 3, 32, 32).cuda()
     model_t.eval()
     model_s.eval()
     feat_t, _ = model_t(data, is_feat=True)
@@ -179,9 +197,9 @@ def main():
     trainable_list.append(model_s)
 
     criterion_cls = nn.CrossEntropyLoss()
-    criterion_div = DistillKL(opt.kd_T)
+    criterion_div = BayesianDistillKL(opt.kd_T) if opt.bayesian_t else DistillKL(opt.kd_T)
     if opt.distill == 'kd':
-        criterion_kd = DistillKL(opt.kd_T)
+        criterion_kd = BayesianDistillKL(opt.kd_T) if opt.bayesian_t else DistillKL(opt.kd_T)
     elif opt.distill == 'hint':
         criterion_kd = HintLoss()
         regress_s = ConvReg(feat_s[opt.hint_layer].shape, feat_t[opt.hint_layer].shape)

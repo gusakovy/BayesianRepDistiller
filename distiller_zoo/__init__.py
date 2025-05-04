@@ -4,7 +4,7 @@ from .CC import Correlation
 from .FitNet import HintLoss
 from .FSP import FSP
 from .FT import FactorTransfer
-from .KD import DistillKL
+from .KD import DistillKL, BayesianDistillKL
 from .KDSVD import KDSVD
 from .NST import NSTLoss
 from .PKT import PKT

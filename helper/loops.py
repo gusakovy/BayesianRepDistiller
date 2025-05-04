@@ -186,12 +186,18 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
             preact = True
         feat_s, logit_s = model_s(input, is_feat=True, preact=preact)
         with torch.no_grad():
-            feat_t, logit_t = model_t(input, is_feat=True, preact=preact)
-            feat_t = [f.detach() for f in feat_t]
+            if opt.bayesian_t:
+                prob_t = sum(map(lambda _: model_t(input).softmax(-1), range(opt.bnn_num_samples))) / opt.bnn_num_samples
+            else:
+                feat_t, logit_t = model_t(input, is_feat=True, preact=preact)
+                feat_t = [f.detach() for f in feat_t]
 
         # cls + kl div
         loss_cls = criterion_cls(logit_s, target)
-        loss_div = criterion_div(logit_s, logit_t)
+        if opt.bayesian_t:
+            loss_div = criterion_div(logit_s, prob_t)
+        else:
+            loss_div = criterion_div(logit_s, logit_t)
 
         # other kd beyond KL divergence
         if opt.distill == 'kd':
